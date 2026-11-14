@@ -190,8 +190,11 @@ export async function validateSsrfUrl(targetUrl: string): Promise<{ valid: boole
       return { valid: false, reason: 'Internal and localhost hosts are prohibited' };
     }
 
-    // Direct IP address check
-    if (isPrivateOrLocalIp(hostname)) {
+        // Direct IP address check (only when the host is an IP address, not a domain name)
+    const bareHost = hostname.replace(/^\[|\]$/g, '');
+    const isIpv4Literal = /^\d{1,3}(\.\d{1,3}){3}$/.test(bareHost);
+    const isIpv6Literal = bareHost.includes(':');
+    if ((isIpv4Literal || isIpv6Literal) && isPrivateOrLocalIp(bareHost)) {
       return { valid: false, reason: 'Private or local IP addresses are prohibited' };
     }
 
