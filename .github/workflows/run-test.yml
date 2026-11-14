@@ -15,18 +15,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    container:
+      image: mcr.microsoft.com/playwright:v1.65.0-noble
+      options: --ipc=host
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
       - name: Install dependencies
         run: npm install --omit=dev --no-audit --no-fund
-
-      - name: Install browser
-        run: npx playwright install --with-deps chromium
 
       - name: Run test
         env:
