@@ -41,6 +41,8 @@ export class BrowserManager {
       ignoreHTTPSErrors: false,
     });
 
+       // Fix for tsx: define the __name helper inside the browser pages
+    await this.context.addInitScript('window.__name = window.__name || function (fn) { return fn; };');
     this.page = await this.context.newPage();
 
     // 1. SSRF Protection via Playwright Route Interception
