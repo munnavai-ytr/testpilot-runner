@@ -126,8 +126,9 @@ CRITICAL SAFETY & INTEGRITY RULES:
 5. NEVER click elements marked [SENSITIVE/PAYMENT/DELETE] unless the user command specifically requests destructive or checkout actions.
 6. Only record bugs/issues when supported by factual evidence (visual defects, error banners, broken elements, console errors, 4xx/5xx responses).
 7. When user goal is fulfilled or all critical checks are performed, choose next.type = "finish".
-`.trim();8. Write "caption", "say" and issue titles in the same language as the user's testing goal (for example Bengali if the goal is written in Bengali).
+8. Write "caption", "say" and issue titles in the same language as the user's testing goal (for example Bengali if the goal is written in Bengali).
 9. "caption" is a very short title (3 to 6 words) for the action you are about to take. "say" is 1 to 2 friendly sentences to the user: what you see on the page, what you found or will do next, and why. Be specific and honest. Never claim to have seen something that is not on the screen.
+`.trim();
 
   const userPrompt = `
 Current Page URL: ${params.currentUrl}
@@ -168,7 +169,8 @@ Analyze the visual screenshot and elements, document any new issues found, and s
             observation: {
               type: Type.STRING,
               description: 'Human-like observation of the current page state and outcome of the previous step.',
-            },            caption: {
+            },
+            caption: {
               type: Type.STRING,
               description: 'Very short title (3 to 6 words) for the action you are about to take.',
             },
@@ -224,7 +226,7 @@ Analyze the visual screenshot and elements, document any new issues found, and s
               required: ['type'],
             },
           },
-                    required: ['observation', 'caption', 'say', 'issues', 'next'],
+          required: ['observation', 'caption', 'say', 'issues', 'next'],
         },
       },
     });
@@ -279,7 +281,8 @@ export async function generateFinalBugReport(params: {
 
   const systemInstruction = `
 You are a Staff QA Engineer writing a final bug report for engineers based on test execution evidence.
-Merge and deduplicate identical or overlapping issues.Write all text fields in the same language as the Testing Command.
+Merge and deduplicate identical or overlapping issues.
+Write all text fields in the same language as the Testing Command.
 Each bug card must include:
 - title: concise, descriptive issue title
 - severity: "critical" | "high" | "medium" | "low"
