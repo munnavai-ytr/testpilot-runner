@@ -3,13 +3,13 @@ import { decideNextAction, generateFinalBugReport } from './gemini';
 import { uploadScreenshot, updateRunStepRow, finalizeRunRow } from './supabase';
 import { calculateScore } from './scoring';
 import { releaseRunLock } from './security';
-import { config } from './config';
+import { config, redactSecrets } from './config';
+import { ChatLog } from './chat';
 import {
   ActionDecision,
   Bug,
   BugSeverity,
   RunCredentials,
-  RunRecord,
   RunStatus,
   Step,
   TestMode,
@@ -36,6 +36,14 @@ export interface AgentRunParams {
   geminiKey: string;
 }
 
+function hostLabel(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
 export class QaAgent {
   private runId: string;
   private url: string;
@@ -45,7 +53,9 @@ export class QaAgent {
   private geminiKey: string;
   private browserManager: BrowserManager;
   private maxSteps: number;
+  private chat: ChatLog;
   private steps: Step[] = [];
+  private seenFindings = new Set<string>();
   private rawIssues: Array<{
     title: string;
     severity: BugSeverity;
@@ -64,6 +74,11 @@ export class QaAgent {
     this.geminiKey = params.geminiKey;
     this.browserManager = new BrowserManager();
     this.maxSteps = config.stepLimits[this.mode] || 15;
+    this.chat = new ChatLog(this.runId, this.maxSteps + 3);
+  }
+
+  private safeText(value: unknown): string {
+    return redactSecrets(String(value), [this.geminiKey]);
   }
 
   /**
@@ -76,14 +91,22 @@ export class QaAgent {
     let finalBugs: Bug[] = [];
 
     try {
+      this.chat.addMessage({
+        type: 'system',
+        text: `Test started. Model: ${config.geminiModel}. Mode: ${this.mode}, up to ${this.maxSteps} steps.`,
+      });
+
       // 1. Launch browser and isolated page
+      this.chat.setStatus('Starting the browser...');
       await this.browserManager.init({ viewport: { width: 1280, height: 720 } });
 
       // 2. Initial navigation to target site
+      this.chat.setStatus('Opening the site...');
       const navStart = Date.now();
       let initialStepScreenshotUrl: string | null = null;
       try {
         await this.browserManager.navigate(this.url);
+        this.chat.setStatus('Taking a screenshot...');
         const screenshotBuf = await this.browserManager.takeScreenshot();
         initialStepScreenshotUrl = await uploadScreenshot(this.runId, 1, screenshotBuf);
 
@@ -93,6 +116,13 @@ export class QaAgent {
           status: 'passed',
           durationMs: Date.now() - navStart,
           screenshot: initialStepScreenshotUrl,
+        });
+        this.chat.addMessage({
+          type: 'system',
+          text: `Opened ${hostLabel(this.url)}`,
+          stepIndex: 1,
+          screenshot: initialStepScreenshotUrl,
+          state: 'done',
         });
       } catch (navErr: unknown) {
         this.steps.push({
@@ -116,6 +146,7 @@ export class QaAgent {
         // Check timeout
         if (Date.now() - startTime > config.hardTimeLimitMs) {
           console.warn(`[Agent] Run ${this.runId} hit execution limit.`);
+          this.chat.addMessage({ type: 'system', text: 'Time limit reached. Wrapping up with what I found.' });
           break;
         }
 
@@ -129,6 +160,7 @@ export class QaAgent {
         // In full_qa mode, test mobile responsiveness around step 6
         if (this.mode === 'full_qa' && stepCounter === 6 && !isMobileTested) {
           isMobileTested = true;
+          this.chat.addMessage({ type: 'system', text: 'Switching to a phone-sized screen (375px) to check the mobile layout.' });
           await this.browserManager.setViewportSize(375, 667);
           await new Promise((r) => setTimeout(r, 600));
         } else if (isMobileTested && stepCounter === 10) {
@@ -139,6 +171,7 @@ export class QaAgent {
         const stepStartTime = Date.now();
 
         // Capture current state screenshot & evidence
+        this.chat.setStatus('Looking at the page...');
         const screenshotBuf = await this.browserManager.takeScreenshot();
         const screenshotBase64 = screenshotBuf.toString('base64');
         const evidence = await this.browserManager.getEvidenceSummary();
@@ -146,6 +179,7 @@ export class QaAgent {
         const currentUrl = this.browserManager.getPage().url();
 
         // Ask Gemini for next action
+        this.chat.setStatus('Thinking about the next step...');
         let decision: ActionDecision;
         try {
           decision = await decideNextAction({
@@ -158,32 +192,76 @@ export class QaAgent {
             elements: interactiveElements,
             evidence,
           });
+          this.chat.countRequest();
         } catch (geminiErr: unknown) {
-          console.error(`[Agent] Gemini decision error:`, geminiErr);
+          this.chat.countRequest();
+          console.error(`[Agent] Gemini decision error:`, this.safeText(geminiErr));
+          const code = (geminiErr as { code?: string } | null)?.code;
+          this.chat.addMessage({
+            type: 'system',
+            text:
+              code === 'gemini_quota_exceeded'
+                ? 'Your Gemini free quota ran out, so I stopped early and saved what I found so far.'
+                : 'The AI did not answer, so I stopped early and saved what I found so far.',
+            state: 'failed',
+          });
+          break;
+        }
+
+        if (!decision || !decision.next || !decision.next.type) {
+          this.chat.addMessage({
+            type: 'system',
+            text: 'The AI gave an unreadable answer, so I stopped early and saved what I found so far.',
+            state: 'failed',
+          });
           break;
         }
 
         // Record any issues identified in this step
         if (decision.issues && decision.issues.length > 0) {
           for (const issue of decision.issues) {
+            const lastShot = this.steps[this.steps.length - 1]?.screenshot || '';
             this.rawIssues.push({
               title: issue.title,
               severity: issue.severity,
               evidence: issue.evidence,
               pageUrl: currentUrl,
-              screenshotUrl: this.steps[this.steps.length - 1]?.screenshot || '',
+              screenshotUrl: lastShot,
               stepIndex: stepCounter,
             });
+
+            const key = String(issue.title || '').trim().toLowerCase();
+            if (key && !this.seenFindings.has(key)) {
+              this.seenFindings.add(key);
+              this.chat.addMessage({
+                type: 'finding',
+                caption: issue.title,
+                text: issue.evidence,
+                severity: issue.severity,
+                stepIndex: stepCounter,
+                screenshot: lastShot || null,
+              });
+            }
           }
         }
 
+        const isFinish = decision.next.type === 'finish';
+        const narration = this.chat.addMessage({
+          type: 'ai',
+          caption: decision.caption || undefined,
+          text: (decision.say || decision.observation || '').trim() || 'Continuing the test.',
+          stepIndex: isFinish ? undefined : stepCounter + 1,
+          state: isFinish ? 'done' : 'running',
+        });
+
         // If goal complete or finished
-        if (decision.next.type === 'finish') {
+        if (isFinish) {
           console.log(`[Agent] Exploration completed by decision: ${decision.observation}`);
           break;
         }
 
         // Execute chosen action
+        this.chat.setStatus(`Doing: ${(decision.caption || decision.next.type).slice(0, 60)}...`);
         const actionResult = await this.browserManager.executeAction(
           decision.next,
           this.credentials,
@@ -191,6 +269,7 @@ export class QaAgent {
         );
 
         stepCounter++;
+        this.chat.setStatus('Taking a screenshot...');
         const postScreenshotBuf = await this.browserManager.takeScreenshot();
         const postScreenshotUrl = await uploadScreenshot(this.runId, stepCounter, postScreenshotBuf);
 
@@ -210,6 +289,18 @@ export class QaAgent {
 
         this.steps.push(stepObj);
 
+        this.chat.updateMessage(narration.id, {
+          screenshot: postScreenshotUrl,
+          state: actionResult.success ? 'done' : 'failed',
+        });
+        if (!actionResult.success) {
+          this.chat.addMessage({
+            type: 'system',
+            text: `That action did not work: ${this.safeText(actionResult.description || 'unknown reason').slice(0, 200)}`,
+            state: 'failed',
+          });
+        }
+
         // Update database immediately after every step for live streaming
         await updateRunStepRow(this.runId, this.steps, currentStatus);
       }
@@ -219,8 +310,10 @@ export class QaAgent {
       }
 
       // 4. Synthesize final bug report from evidence and steps
+      this.chat.setStatus('Writing the report...');
       const finalEvidence = await this.browserManager.getEvidenceSummary();
 
+      if (this.rawIssues.length > 0) this.chat.countRequest();
       finalBugs = await generateFinalBugReport({
         apiKey: this.geminiKey,
         command: this.command,
@@ -230,13 +323,19 @@ export class QaAgent {
         evidence: finalEvidence,
       });
     } catch (err: unknown) {
-      console.error(`[Agent] Run ${this.runId} encountered error:`, err);
+      console.error(`[Agent] Run ${this.runId} encountered error:`, this.safeText(err));
       if (currentStatus !== 'stopped') {
         currentStatus = 'failed';
       }
+      const rawMessage =
+        err instanceof Error
+          ? err.message
+          : typeof err === 'object' && err !== null && typeof (err as { message?: unknown }).message === 'string'
+          ? String((err as { message: string }).message)
+          : 'An unexpected error occurred during test execution.';
       runError = {
         code: 'run_failed',
-        message: err instanceof Error ? err.message : 'An unexpected error occurred during test execution.',
+        message: this.safeText(rawMessage).slice(0, 500),
       };
     } finally {
       // 5. Clean up browser
@@ -250,6 +349,20 @@ export class QaAgent {
 
       // Calculate deterministic score
       const score = calculateScore(finalBugs);
+
+      // Closing messages in the chat
+      if (currentStatus === 'stopped') {
+        this.chat.addMessage({ type: 'system', text: 'Stopped by you. Saved what I found so far.' });
+      } else if (runError) {
+        this.chat.addMessage({ type: 'system', text: `The test failed: ${runError.message}`, state: 'failed' });
+      } else {
+        this.chat.addMessage({
+          type: 'summary',
+          text: `Test finished: ${this.steps.length} steps, ${finalBugs.length} bug(s), score ${score}/100.`,
+        });
+      }
+      this.chat.setStatus(null);
+      await this.chat.flush();
 
       // Finalize run in Supabase
       await finalizeRunRow(this.runId, {
