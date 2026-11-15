@@ -224,7 +224,7 @@ Analyze the visual screenshot and elements, document any new issues found, and s
               required: ['type'],
             },
           },
-          required: ['observation', 'issues', 'next'],
+                    required: ['observation', 'caption', 'say', 'issues', 'next'],
         },
       },
     });
@@ -279,7 +279,7 @@ export async function generateFinalBugReport(params: {
 
   const systemInstruction = `
 You are a Staff QA Engineer writing a final bug report for engineers based on test execution evidence.
-Merge and deduplicate identical or overlapping issues.
+Merge and deduplicate identical or overlapping issues.Write all text fields in the same language as the Testing Command.
 Each bug card must include:
 - title: concise, descriptive issue title
 - severity: "critical" | "high" | "medium" | "low"
