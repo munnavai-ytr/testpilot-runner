@@ -65,7 +65,8 @@ export interface InteractiveElement {
 }
 
 export interface ActionDecision {
-  observation: string;
+  observation: string;  caption?: string;
+  say?: string;
   issues: Array<{
     title: string;
     severity: BugSeverity;
