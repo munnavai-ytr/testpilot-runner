@@ -168,6 +168,13 @@ Analyze the visual screenshot and elements, document any new issues found, and s
             observation: {
               type: Type.STRING,
               description: 'Human-like observation of the current page state and outcome of the previous step.',
+            },            caption: {
+              type: Type.STRING,
+              description: 'Very short title (3 to 6 words) for the action you are about to take.',
+            },
+            say: {
+              type: Type.STRING,
+              description: 'One or two friendly sentences to the user about what you see, what you found, and what you will do next and why.',
             },
             issues: {
               type: Type.ARRAY,
